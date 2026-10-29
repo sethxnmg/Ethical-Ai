@@ -51,9 +51,9 @@ jobs:
             exit 1
           fi
 
-          # Require the tagged commit to belong to main.
-          git show-ref --verify --quiet refs/remotes/origin/main
-          git merge-base --is-ancestor HEAD refs/remotes/origin/main
+          # Require the tagged commit to belong to master (default branch).
+          git show-ref --verify --quiet refs/remotes/origin/master
+          git merge-base --is-ancestor HEAD refs/remotes/origin/master
 
       - name: Check release inputs
         run: |
