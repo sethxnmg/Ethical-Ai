@@ -1,0 +1,210 @@
+name: Publish CERBERUS Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# No permissions unless explicitly granted by a job.
+permissions: {}
+
+concurrency:
+  group: cerberus-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Package and publish framework
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    permissions:
+      contents: write
+
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ github.ref_name }}
+
+    steps:
+      - name: Check out tagged revision
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate release tag
+        run: |
+          set -euo pipefail
+
+          # Accepted examples:
+          # v0.1.0
+          # v1.0.0-rc.1
+          # v1.2.3-beta.2
+          if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)\.(0|[1-9][0-9]*))?$ ]]; then
+            echo "Unsupported release tag: $RELEASE_TAG" >&2
+            echo "Use vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-rc.N." >&2
+            exit 1
+          fi
+
+          # Require the tagged commit to belong to main.
+          git show-ref --verify --quiet refs/remotes/origin/main
+          git merge-base --is-ancestor HEAD refs/remotes/origin/main
+
+      - name: Check release inputs
+        run: |
+          set -euo pipefail
+
+          required=(
+            README.md
+            CONTRIBUTING.md
+            SECURITY.md
+            docs/methodology.md
+            docs/product-requirements.md
+            templates/request.md
+            templates/evidence-matrix.csv
+            templates/approach.md
+            templates/delivery.md
+            templates/qa-checklist.md
+          )
+
+          for file in "${required[@]}"; do
+            if [[ ! -s "$file" ]]; then
+              echo "Missing or empty release input: $file" >&2
+              exit 1
+            fi
+          done
+
+          # Never package tracked private workspace contents.
+          while IFS= read -r -d '' file; do
+            case "$file" in
+              research/.gitkeep|reports/.gitkeep)
+                ;;
+              research/*|reports/*)
+                echo "Private workspace contains tracked content: $file" >&2
+                exit 1
+                ;;
+            esac
+          done < <(git ls-files -z)
+
+      - name: Build release archives
+        run: |
+          set -euo pipefail
+
+          mkdir -p dist
+
+          package="cerberus-${RELEASE_TAG}"
+          inputs=(
+            README.md
+            CONTRIBUTING.md
+            SECURITY.md
+            docs
+            templates
+          )
+
+          # Include a license only if the project has selected one.
+          for file in LICENSE LICENSE.md LICENSE.txt NOTICE; do
+            if [[ -f "$file" ]]; then
+              inputs+=("$file")
+            fi
+          done
+
+          # Archive tracked content from the tagged commit only.
+          git archive \
+            --format=tar.gz \
+            --prefix="${package}/" \
+            --output="dist/${package}.tar.gz" \
+            HEAD -- "${inputs[@]}"
+
+          git archive \
+            --format=zip \
+            --prefix="${package}/" \
+            --output="dist/${package}.zip" \
+            HEAD -- "${inputs[@]}"
+
+          (
+            cd dist
+            sha256sum \
+              "${package}.tar.gz" \
+              "${package}.zip" \
+              > SHA256SUMS.txt
+
+            sha256sum --check SHA256SUMS.txt
+          )
+
+      - name: Write release notes
+        run: |
+          set -euo pipefail
+
+          commit="$(git rev-parse HEAD)"
+
+          cat > dist/RELEASE_NOTES.md <<EOF
+          # CERBERUS ${RELEASE_TAG}
+
+          Documentation and research-template distribution for Project CERBERUS.
+
+          ## Included
+
+          - Canonical five-stage research methodology.
+          - Product requirements and acceptance criteria.
+          - Research request and evidence-matrix templates.
+          - Approach and delivery templates.
+          - Quality-assurance checklist.
+          - Contribution and security guidance.
+
+          ## Scope
+
+          This release distributes the framework and templates.
+          It does not contain an implemented application or automated
+          factual-verification system.
+
+          ## Downloads
+
+          Choose either the ZIP or tar.gz archive; both contain the same
+          framework files.
+
+          SHA256SUMS.txt provides checksums for the downloadable archives.
+
+          ## Source Revision
+
+          - Tag: ${RELEASE_TAG}
+          - Commit: ${commit}
+          EOF
+
+      - name: Publish GitHub release
+        run: |
+          set -euo pipefail
+
+          flags=(
+            --verify-tag
+            --title "CERBERUS ${RELEASE_TAG}"
+            --notes-file dist/RELEASE_NOTES.md
+          )
+
+          if [[ "$RELEASE_TAG" == *-* ]]; then
+            flags+=(--prerelease)
+          fi
+
+          # No --clobber or update operation:
+          # an existing release is not overwritten.
+          gh release create "$RELEASE_TAG" \
+            "dist/cerberus-${RELEASE_TAG}.tar.gz" \
+            "dist/cerberus-${RELEASE_TAG}.zip" \
+            "dist/SHA256SUMS.txt" \
+            "${flags[@]}"
+
+      - name: Write workflow summary
+        run: |
+          {
+            echo "## CERBERUS release published"
+            echo
+            echo "- Tag: ${RELEASE_TAG}"
+            echo "- Commit: $(git rev-parse HEAD)"
+            echo "- Assets: ZIP, tar.gz, and SHA-256 checksums"
+            echo
+            echo "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG}"
+          } >> "$GITHUB_STEP_SUMMARY"
